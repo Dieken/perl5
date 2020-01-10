@@ -324,13 +324,33 @@ Perl_grok_oct(pTHX_ const char *start, STRLEN *len_p, I32 *flags, NV *result)
     return grok_oct(start, len_p, flags, result);
 }
 
+STATIC void
+S_output_non_portable(pTHX_ const U8 shift)
+{
+    const U8 base = 1 << shift;
+    const char * which = (base == 2)
+                      ? "Binary number > 0b11111111111111111111111111111111"
+                      : (base == 8)
+                        ? "Octal number > 037777777777"
+                        : "Hexadecimal number > 0xffffffff";
+    /* Also there are listings for the other two.  Since they are the first
+     * word, it would be hard for a user to find them there starting with a
+     * %s. */
+    /* diag_listed_as: Hexadecimal number > 0xffffffff non-portable */
+    Perl_ck_warner(aTHX_ packWARN(WARN_PORTABLE), "%s non-portable", which);
+}
+
 UV
 Perl_grok_bin_oct_hex(pTHX_ const char *start,
                         STRLEN *len_p,
                         I32 *flags,
                         NV *result,
-                        const unsigned shift) /* 1 for binary; 3 for octal;
+                        const unsigned shift, /* 1 for binary; 3 for octal;
                                                  4 for hex */
+                        const U8 class_bit,
+                        const char prefix
+                     )
+
 {
     const char *s = start;
     STRLEN len = *len_p;
@@ -338,11 +358,6 @@ Perl_grok_bin_oct_hex(pTHX_ const char *start,
     NV value_nv = 0;
     const PERL_UINT_FAST8_T base = 1 << shift;
     const UV max_div= UV_MAX / base;
-    const PERL_UINT_FAST8_T class_bit = (base == 2)
-                                        ? _CC_BINDIGIT
-                                        : (base == 8)
-                                          ? _CC_OCTDIGIT
-                                          : _CC_XDIGIT;
     const bool allow_underscores = cBOOL(*flags & PERL_SCAN_ALLOW_UNDERSCORES);
     bool already_output_overflow_warning = FALSE;
 
@@ -354,8 +369,7 @@ Perl_grok_bin_oct_hex(pTHX_ const char *start,
 
     ASSUME(inRANGE(shift, 1, 4) && shift != 2);
 
-    if (base != 8 && !(*flags & PERL_SCAN_DISALLOW_PREFIX)) {
-        const char prefix = base == 2 ? 'b' : 'x';
+    if (!(*flags & PERL_SCAN_DISALLOW_PREFIX)) {
 
         /* strip off leading b or 0b; x or 0x.
            for compatibility silently suffer "b" and "0b" as valid binary; "x"
@@ -372,6 +386,35 @@ Perl_grok_bin_oct_hex(pTHX_ const char *start,
         }
     }
 
+    if (len && *s && _generic_isCC(*s, class_bit)) {
+        value = (value << shift) | XDIGIT_VALUE(*s);
+        len--; s++;
+        if (len && *s && _generic_isCC(*s, class_bit)) {
+            value = (value << shift) | XDIGIT_VALUE(*s);
+            len--; s++;
+            if (len && *s && _generic_isCC(*s, class_bit)) {
+                value = (value << shift) | XDIGIT_VALUE(*s);
+                len--; s++;
+                if (len && *s && _generic_isCC(*s, class_bit)) {
+                    value = (value << shift) | XDIGIT_VALUE(*s);
+                    len--; s++;
+                    if (len && *s && _generic_isCC(*s, class_bit)) {
+                        value = (value << shift) | XDIGIT_VALUE(*s);
+                        len--; s++;
+                        if (len && *s && _generic_isCC(*s, class_bit)) {
+                            value = (value << shift) | XDIGIT_VALUE(*s);
+                            len--; s++;
+                            if (len && *s && _generic_isCC(*s, class_bit)) {
+                                value = (value << shift) | XDIGIT_VALUE(*s);
+                                len--; s++;
+                                factor = shift << 7;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     for (; len-- && *s; s++) {
         if (_generic_isCC(*s, class_bit)) {
             /* Write it in this wonky order with a goto to attempt to get the
@@ -416,6 +459,7 @@ Perl_grok_bin_oct_hex(pTHX_ const char *start,
             continue;
         }
 
+        /* XXX allows leading underscores */
         if (   *s == '_'
             && len
             && allow_underscores
@@ -452,35 +496,26 @@ Perl_grok_bin_oct_hex(pTHX_ const char *start,
         break;
     }
 
-    /* Calculate the final overflow approximation */
-    if (value_nv != 0.0) {
-        value_nv *= (NV) factor;
-        value_nv += (NV) value;
-    }
-
-    if (   ( value_nv > 4294967295.0)
-#if UVSIZE > 4
-        || (      value_nv == 0.0 && value > 0xffffffff
-            && ! (*flags & PERL_SCAN_SILENT_NON_PORTABLE))
-#endif
-    ) {
-        const char * which = (base == 2)
-                          ? "Binary number > 0b11111111111111111111111111111111"
-                          : (base == 8)
-                            ? "Octal number > 037777777777"
-                            : "Hexadecimal number > 0xffffffff";
-        /* Also there are listings for the other two.  Since they are the first
-         * word, it would be hard for a user to find them there starting with a
-         * %s. */
-        /* diag_listed_as: Hexadecimal number > 0xffffffff non-portable */
-        Perl_ck_warner(aTHX_ packWARN(WARN_PORTABLE), "%s non-portable", which);
-    }
-
     *len_p = s - start;
 
-    if (value_nv == 0.0) {  /* No overflow */
+    if (LIKELY(value_nv == 0.0)) {
+#if UVSIZE > 4
+        if (      UNLIKELY(value > 0xffffffff)
+            && ! (*flags & PERL_SCAN_SILENT_NON_PORTABLE))
+        {
+            S_output_non_portable(aTHX_ shift);
+        }
+#endif
         *flags = 0;
         return value;
+    }
+
+    /* Overflowed: Calculate the final overflow approximation */
+    value_nv *= (NV) factor;
+    value_nv += (NV) value;
+
+    if (value_nv > 4294967295.0) {
+        S_output_non_portable(aTHX_ shift);
     }
 
     *flags = PERL_SCAN_GREATER_THAN_UV_MAX;
