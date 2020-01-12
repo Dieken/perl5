@@ -352,8 +352,11 @@ Perl_grok_bin_oct_hex(pTHX_ const char *start,
                      )
 
 {
-    const char *s = start;
+    const char *s0 = start;
+    const char *s;
     STRLEN len = *len_p;
+    STRLEN max_len = my_strnlen(start, len);
+    STRLEN bytes_so_far;
     UV value = 0;
     NV value_nv = 0;
     const PERL_UINT_FAST8_T base = 1 << shift;
@@ -363,11 +366,16 @@ Perl_grok_bin_oct_hex(pTHX_ const char *start,
 
     /* In overflows, this keeps track of how much to multiply the overflowed NV
      * by as we continue to parse the remaining digits */
-    UV factor = 1;
+    UV factor;
 
     PERL_ARGS_ASSERT_GROK_BIN_OCT_HEX;
 
     ASSUME(inRANGE(shift, 1, 4) && shift != 2);
+
+    if (UNLIKELY(max_len < len)) {
+        len = max_len;
+        *len_p = len;
+    }
 
     if (!(*flags & PERL_SCAN_DISALLOW_PREFIX)) {
 
@@ -375,47 +383,69 @@ Perl_grok_bin_oct_hex(pTHX_ const char *start,
            for compatibility silently suffer "b" and "0b" as valid binary; "x"
            and "0x" as valid hex numbers. */
         if (len >= 1) {
-            if (isALPHA_FOLD_EQ(s[0], prefix)) {
-                s++;
+            if (isALPHA_FOLD_EQ(s0[0], prefix)) {
+                s0++;
                 len--;
             }
-            else if (len >= 2 && s[0] == '0' && (isALPHA_FOLD_EQ(s[1], prefix))) {
-                s+=2;
+            else if (len >= 2 && s0[0] == '0' && (isALPHA_FOLD_EQ(s0[1], prefix))) {
+                s0+=2;
                 len-=2;
             }
         }
     }
 
-    if (len && *s && _generic_isCC(*s, class_bit)) {
-        value = (value << shift) | XDIGIT_VALUE(*s);
-        len--; s++;
-        if (len && *s && _generic_isCC(*s, class_bit)) {
-            value = (value << shift) | XDIGIT_VALUE(*s);
-            len--; s++;
-            if (len && *s && _generic_isCC(*s, class_bit)) {
-                value = (value << shift) | XDIGIT_VALUE(*s);
-                len--; s++;
-                if (len && *s && _generic_isCC(*s, class_bit)) {
-                    value = (value << shift) | XDIGIT_VALUE(*s);
-                    len--; s++;
-                    if (len && *s && _generic_isCC(*s, class_bit)) {
-                        value = (value << shift) | XDIGIT_VALUE(*s);
-                        len--; s++;
-                        if (len && *s && _generic_isCC(*s, class_bit)) {
-                            value = (value << shift) | XDIGIT_VALUE(*s);
-                            len--; s++;
-                            if (len && *s && _generic_isCC(*s, class_bit)) {
-                                value = (value << shift) | XDIGIT_VALUE(*s);
-                                len--; s++;
-                                factor = shift << 7;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    s = s0;
+
+    switch (len) {
+      default:
+          if (! _generic_isCC(*s, class_bit))  break;
+          value = (value << shift) | XDIGIT_VALUE(*s);
+          s++;
+          /* FALLTHROUGH */
+      case 6:
+          if (! _generic_isCC(*s, class_bit))  break;
+          value = (value << shift) | XDIGIT_VALUE(*s);
+          s++;
+          /* FALLTHROUGH */
+      case 5:
+          if (! _generic_isCC(*s, class_bit))  break;
+          value = (value << shift) | XDIGIT_VALUE(*s);
+          s++;
+          /* FALLTHROUGH */
+      case 4:
+          if (! _generic_isCC(*s, class_bit))  break;
+          value = (value << shift) | XDIGIT_VALUE(*s);
+          s++;
+          /* FALLTHROUGH */
+      case 3:
+          if (! _generic_isCC(*s, class_bit))  break;
+          value = (value << shift) | XDIGIT_VALUE(*s);
+          s++;
+          /* FALLTHROUGH */
+      case 2:
+          if (! _generic_isCC(*s, class_bit))  break;
+          value = (value << shift) | XDIGIT_VALUE(*s);
+          s++;
+          /* FALLTHROUGH */
+      case 1:
+          if (! _generic_isCC(*s, class_bit))  break;
+          value = (value << shift) | XDIGIT_VALUE(*s);
+          /* FALLTHROUGH */
+      case 0:
+          if (LIKELY(len < 7)) {
+              *flags = 0;
+              return value;
+          }
+
+          s++;
+          break;
     }
-    for (; len-- && *s; s++) {
+
+    bytes_so_far = s - s0;
+    factor = shift << bytes_so_far;
+    len -= bytes_so_far;
+
+    for (; len--; s++) {
         if (_generic_isCC(*s, class_bit)) {
             /* Write it in this wonky order with a goto to attempt to get the
                compiler to make the common case integer-only loop pretty tight.
